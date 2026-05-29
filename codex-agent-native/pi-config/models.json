@@ -1,0 +1,39 @@
+{
+  "providers": {
+    "omniroute": {
+      "baseUrl": "https://omni.mipopkov.com/v1",
+      "api": "openai-completions",
+      "apiKey": "OMNIROUTE_API_KEY",
+      "models": [
+        {
+          "id": "codex/gpt-5.3-codex",
+          "name": "Codex GPT 5.3 Medium via OmniRoute",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1100000,
+          "maxTokens": 128000,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "codex/gpt-5.5-high",
+          "name": "Codex GPT 5.5 High via OmniRoute",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1100000,
+          "maxTokens": 128000,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}

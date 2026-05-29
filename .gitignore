@@ -1,0 +1,14 @@
+# Runtime artifacts
+.codex/
+.venv/
+__pycache__/
+*.py[cod]
+runs/
+codex-agent-native/runs/
+codex-agent-native/.venv/
+codex-agent-native/__pycache__/
+task-context-snapshots/
+logs/
+tmp/
+.DS_Store
+.env
