@@ -40,6 +40,7 @@ from urllib import request as urlrequest
 
 from tool_gateway import ToolGateway
 import harness_seed
+from runtime_tools import _submission_payload
 from scratchpad import compact_scratchpad, ensure_scratchpad_files, load_json, scratchpad_enabled, scratchpad_mode
 from workspace import create_task_workspace
 
@@ -110,6 +111,16 @@ NATIVE_EXEC_FINISH_HELPER = _env_enabled("NATIVE_EXEC_FINISH_HELPER", "0")
 NATIVE_EXEC_RUN_HELPER = _env_enabled("NATIVE_EXEC_RUN_HELPER", "0")
 NATIVE_FINALIZE_RESCUE = _env_enabled("NATIVE_FINALIZE_RESCUE", "0")
 NATIVE_FINALIZE_RESCUE_ATTEMPTS = max(0, min(int(os.getenv("NATIVE_FINALIZE_RESCUE_ATTEMPTS") or 1), 3))
+NATIVE_PANGOLIN_FINALIZE_NUDGE = _env_enabled("NATIVE_PANGOLIN_FINALIZE_NUDGE", "0")
+NATIVE_PANGOLIN_FINALIZE_NUDGE_REMAINING = max(
+    1, int(os.getenv("NATIVE_PANGOLIN_FINALIZE_NUDGE_REMAINING") or 3)
+)
+NATIVE_PANGOLIN_FINALIZE_RESCUE = _env_enabled("NATIVE_PANGOLIN_FINALIZE_RESCUE", "0")
+NATIVE_PANGOLIN_FINALIZE_RESCUE_ATTEMPTS = max(
+    0, min(int(os.getenv("NATIVE_PANGOLIN_FINALIZE_RESCUE_ATTEMPTS") or 1), 5)
+)
+NATIVE_PANGOLIN_AUTO_FINISH_SCRATCHPAD = _env_enabled("NATIVE_PANGOLIN_AUTO_FINISH_SCRATCHPAD", "0")
+NATIVE_PANGOLIN_AUTO_FINISH_REQUIRE_REFS = _env_enabled("NATIVE_PANGOLIN_AUTO_FINISH_REQUIRE_REFS", "1")
 NATIVE_ECOM_METHOD_CARDS = _env_enabled("NATIVE_ECOM_METHOD_CARDS", "0")
 NATIVE_ECOM_METHOD_CARD_LIMIT = max(1, min(int(os.getenv("NATIVE_ECOM_METHOD_CARD_LIMIT") or 1), 4))
 NATIVE_ECOM_METHOD_CARD_MIN_SCORE = max(1, int(os.getenv("NATIVE_ECOM_METHOD_CARD_MIN_SCORE") or 1))
@@ -974,6 +985,109 @@ def _pangolin_repair_prompt(reason: str) -> str:
     )
 
 
+def _pangolin_finalize_nudge(remaining_calls: int) -> str:
+    return (
+        "FINALIZATION WINDOW: "
+        f"only {remaining_calls} model call(s) remain before the session stops. "
+        "If you have a final answer or a credible candidate in scratchpad/stdout, the next execute_code must submit it with "
+        "finish(message=..., outcome='OUTCOME_OK', refs=[...], answer=...). "
+        "Do not continue broad exploration; gather at most one targeted missing fact, then finish in the same execute_code call."
+    )
+
+
+def _pangolin_finalize_rescue_prompt() -> str:
+    return (
+        "FINALIZATION RESCUE: the normal iteration budget ended without a submission. "
+        "Your next response must call execute_code exactly once. In that code, submit with finish(...). "
+        "Use the current scratchpad and previous tool outputs; do not restart exploration. "
+        "If the final answer is already visible in stdout or scratchpad, submit it immediately with exact refs. "
+        "If one fact is missing, gather only that fact and call finish(...) in the same execute_code call."
+    )
+
+
+def _scratchpad_refs_for_submission(sp: dict[str, Any]) -> list[str]:
+    refs_raw = (
+        sp.get("supporting_refs")
+        or sp.get("final_candidate_refs")
+        or sp.get("grounding_refs")
+        or sp.get("refs")
+        or []
+    )
+    if not isinstance(refs_raw, list):
+        return []
+    return [str(ref).strip() for ref in refs_raw if str(ref).strip()]
+
+
+def _try_pangolin_auto_finish_from_scratchpad(
+    *, env: str, workspace: Any, task_id: str, iteration: int, events_path: Path
+) -> bool:
+    if not NATIVE_PANGOLIN_AUTO_FINISH_SCRATCHPAD or workspace.submission_path.exists():
+        return False
+    loaded = load_json(workspace.pangolin_scratchpad_path, {"refs": []})
+    if not isinstance(loaded, dict):
+        return False
+    answer = str(loaded.get("answer") or loaded.get("message") or "").strip()
+    message = str(loaded.get("message") or answer).strip()
+    refs = _scratchpad_refs_for_submission(loaded)
+    outcome = str(loaded.get("outcome") or "OUTCOME_OK").strip() or "OUTCOME_OK"
+    reason = ""
+    if not (answer or message):
+        reason = "missing_answer"
+    elif NATIVE_PANGOLIN_AUTO_FINISH_REQUIRE_REFS and not refs:
+        reason = "missing_refs"
+    elif outcome not in {"OUTCOME_OK", "OUTCOME_DENIED_SECURITY", "OUTCOME_NONE_CLARIFICATION", "OUTCOME_NONE_UNSUPPORTED", "OUTCOME_ERR_INTERNAL"}:
+        reason = f"bad_outcome:{outcome}"
+    if reason:
+        workspace.append_jsonl(
+            events_path,
+            {
+                "event": "pangolin_auto_finish_skipped",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "iteration": iteration,
+                "reason": reason,
+                "scratchpad_keys": sorted(str(key) for key in loaded.keys()),
+            },
+        )
+        return False
+    args = {
+        "message": message or answer,
+        "answer": answer or message,
+        "outcome": outcome,
+        "grounding_refs": refs,
+    }
+    try:
+        ToolGateway.from_workspace_context(workspace).call(
+            step=iteration * 1000 + 999,
+            tool="report_completion",
+            args=args,
+        )
+        submission = _submission_payload(env, args)
+        workspace.write_json(workspace.submission_path, submission)
+    except Exception as exc:
+        workspace.append_jsonl(
+            events_path,
+            {
+                "event": "pangolin_auto_finish_failed",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "iteration": iteration,
+                "error": str(exc),
+            },
+        )
+        return False
+    workspace.append_jsonl(
+        events_path,
+        {
+            "event": "pangolin_auto_finish_submitted",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "iteration": iteration,
+            "refs": len(refs),
+            "submission": submission,
+        },
+    )
+    _stage("PANGOLIN_AUTO_FINISH", f"refs={len(refs)}", task_id=task_id)
+    return True
+
+
 def _add_usage(acc: dict[str, Any], item: dict[str, Any] | None) -> None:
     if not item:
         return
@@ -1697,12 +1811,39 @@ def _run_pangolin_session(
     returncode = 0
     empty_no_tool_calls = 0
     high_context_repeats = 0
+    rescue_iterations = NATIVE_PANGOLIN_FINALIZE_RESCUE_ATTEMPTS if NATIVE_PANGOLIN_FINALIZE_RESCUE else 0
+    total_iterations = NATIVE_PANGOLIN_MAX_ITERATIONS + rescue_iterations
 
     try:
-        for iteration in range(1, NATIVE_PANGOLIN_MAX_ITERATIONS + 1):
+        for iteration in range(1, total_iterations + 1):
             if time.monotonic() > deadline:
                 raise TimeoutError(
                     f"pangolin session timeout after {max(60, NATIVE_SESSION_TIMEOUT_SEC)}s"
+                )
+            if iteration == NATIVE_PANGOLIN_MAX_ITERATIONS + 1:
+                if _try_pangolin_auto_finish_from_scratchpad(
+                    env=env,
+                    workspace=workspace,
+                    task_id=task_id,
+                    iteration=NATIVE_PANGOLIN_MAX_ITERATIONS,
+                    events_path=events_path,
+                ):
+                    break
+                messages = _compact_messages(
+                    messages,
+                    reason="max_iterations_finalize_rescue",
+                    events_path=events_path,
+                    keep_tail=6,
+                )
+                messages.append({"role": "user", "content": _pangolin_finalize_rescue_prompt()})
+                workspace.append_jsonl(
+                    events_path,
+                    {
+                        "event": "pangolin_finalize_rescue_prompted",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "iteration": iteration,
+                        "attempts": rescue_iterations,
+                    },
                 )
             current_sp = load_json(workspace.pangolin_scratchpad_path, {"refs": []})
             if not isinstance(current_sp, dict):
@@ -1713,6 +1854,11 @@ def _run_pangolin_session(
                 + json.dumps(compact_scratchpad(current_sp), ensure_ascii=True, indent=2)
                 + "\n```\n"
             )
+            remaining_calls = total_iterations - iteration + 1
+            if iteration > NATIVE_PANGOLIN_MAX_ITERATIONS:
+                instructions += "\n" + _pangolin_finalize_rescue_prompt() + "\n"
+            if NATIVE_PANGOLIN_FINALIZE_NUDGE and remaining_calls <= NATIVE_PANGOLIN_FINALIZE_NUDGE_REMAINING:
+                instructions += "\n" + _pangolin_finalize_nudge(remaining_calls) + "\n"
             body = {
                 "model": NATIVE_PANGOLIN_MODEL,
                 "instructions": instructions,
@@ -1921,6 +2067,14 @@ def _run_pangolin_session(
                 high_context_repeats = 0
         else:
             returncode = 1
+        if not workspace.submission_path.exists():
+            _try_pangolin_auto_finish_from_scratchpad(
+                env=env,
+                workspace=workspace,
+                task_id=task_id,
+                iteration=total_iterations,
+                events_path=events_path,
+            )
     except Exception:
         returncode = 1
         raise
@@ -1942,6 +2096,12 @@ def _run_pangolin_session(
             "state_path": str(workspace.pangolin_state_path),
             "empty_guard_count": NATIVE_PANGOLIN_EMPTY_GUARD_COUNT,
             "syntax_repair": NATIVE_PANGOLIN_SYNTAX_REPAIR,
+            "finalize_nudge": NATIVE_PANGOLIN_FINALIZE_NUDGE,
+            "finalize_nudge_remaining": NATIVE_PANGOLIN_FINALIZE_NUDGE_REMAINING,
+            "finalize_rescue": NATIVE_PANGOLIN_FINALIZE_RESCUE,
+            "finalize_rescue_attempts": NATIVE_PANGOLIN_FINALIZE_RESCUE_ATTEMPTS,
+            "auto_finish_scratchpad": NATIVE_PANGOLIN_AUTO_FINISH_SCRATCHPAD,
+            "auto_finish_require_refs": NATIVE_PANGOLIN_AUTO_FINISH_REQUIRE_REFS,
             "context_compact_tokens": NATIVE_PANGOLIN_CONTEXT_COMPACT_TOKENS,
             "scratchpad_compact_bytes": NATIVE_PANGOLIN_SCRATCHPAD_COMPACT_BYTES,
             "ecom_method_cards": NATIVE_ECOM_METHOD_CARDS,
