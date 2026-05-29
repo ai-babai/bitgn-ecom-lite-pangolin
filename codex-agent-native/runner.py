@@ -1,6 +1,7 @@
 # pyright: reportMissingImports=false
 
 import json
+import importlib.util
 import os
 import re
 import select
@@ -109,6 +110,10 @@ NATIVE_EXEC_FINISH_HELPER = _env_enabled("NATIVE_EXEC_FINISH_HELPER", "0")
 NATIVE_EXEC_RUN_HELPER = _env_enabled("NATIVE_EXEC_RUN_HELPER", "0")
 NATIVE_FINALIZE_RESCUE = _env_enabled("NATIVE_FINALIZE_RESCUE", "0")
 NATIVE_FINALIZE_RESCUE_ATTEMPTS = max(0, min(int(os.getenv("NATIVE_FINALIZE_RESCUE_ATTEMPTS") or 1), 3))
+NATIVE_ECOM_METHOD_CARDS = _env_enabled("NATIVE_ECOM_METHOD_CARDS", "0")
+NATIVE_ECOM_METHOD_CARD_LIMIT = max(1, min(int(os.getenv("NATIVE_ECOM_METHOD_CARD_LIMIT") or 1), 4))
+NATIVE_ECOM_METHOD_CARD_MIN_SCORE = max(1, int(os.getenv("NATIVE_ECOM_METHOD_CARD_MIN_SCORE") or 1))
+NATIVE_ECOM_METHOD_CARD_SOURCE = (os.getenv("NATIVE_ECOM_METHOD_CARD_SOURCE") or "").strip()
 
 
 def _feedback_optional() -> bool:
@@ -606,6 +611,106 @@ def _post_pangolin_response(*, api_key: str, body: dict[str, Any]) -> dict[str, 
     raise last_error or RuntimeError("Pangolin API request failed")
 
 
+_ECOM_METHOD_CARDS_CACHE: list[dict[str, Any]] | None = None
+
+
+def _method_card_source_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    if NATIVE_ECOM_METHOD_CARD_SOURCE:
+        candidates.append(Path(NATIVE_ECOM_METHOD_CARD_SOURCE).expanduser())
+    code_root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            code_root / "ecom-operation-overfit" / "hybrid" / "method_cards.py",
+            code_root / "bitgn-ecom-pac-overfit-test" / "hybrid" / "method_cards.py",
+        ]
+    )
+    return candidates
+
+
+def _load_ecom_method_cards() -> list[dict[str, Any]]:
+    global _ECOM_METHOD_CARDS_CACHE
+    if _ECOM_METHOD_CARDS_CACHE is not None:
+        return _ECOM_METHOD_CARDS_CACHE
+    for source in _method_card_source_candidates():
+        if not source.exists():
+            continue
+        spec = importlib.util.spec_from_file_location("ecom_method_cards_external", source)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            _cli(f"[METHOD_CARDS] Failed to load {source}: {exc}")
+            continue
+        cards = getattr(module, "METHOD_CARDS", None)
+        if isinstance(cards, list):
+            _ECOM_METHOD_CARDS_CACHE = [card for card in cards if isinstance(card, dict)]
+            return _ECOM_METHOD_CARDS_CACHE
+    _ECOM_METHOD_CARDS_CACHE = []
+    return _ECOM_METHOD_CARDS_CACHE
+
+
+def _score_method_card(instruction: str, card: dict[str, Any]) -> int:
+    text = instruction.lower()
+    score = 0
+    for pattern in card.get("triggers", []):
+        try:
+            if re.search(str(pattern), text, re.I):
+                score += 3
+        except re.error:
+            continue
+    for term in card.get("terms", []):
+        if str(term).lower() in text:
+            score += 1
+    return score
+
+
+def _compact_method_card(card: dict[str, Any], score: int) -> dict[str, Any]:
+    keep_keys = [
+        "family",
+        "when_to_use",
+        "preferred_pipeline",
+        "legacy_algorithm",
+        "refs_policy",
+        "common_failures",
+        "source_method",
+    ]
+    compacted = {key: card.get(key) for key in keep_keys if card.get(key)}
+    compacted["match_score"] = score
+    return compacted
+
+
+def _ecom_method_cards_block(instruction: str) -> str:
+    if not NATIVE_ECOM_METHOD_CARDS:
+        return ""
+    cards = _load_ecom_method_cards()
+    if not cards:
+        return ""
+    scored = sorted(
+        ((_score_method_card(instruction, card), card) for card in cards),
+        key=lambda item: (-item[0], str(item[1].get("family") or "")),
+    )
+    picked = [
+        _compact_method_card(card, score)
+        for score, card in scored
+        if score >= NATIVE_ECOM_METHOD_CARD_MIN_SCORE
+    ][:NATIVE_ECOM_METHOD_CARD_LIMIT]
+    if not picked:
+        return ""
+    text = json.dumps(picked, ensure_ascii=True, indent=2)
+    return (
+        "Nearest ECOM method-card hints from the legacy deterministic solver. "
+        "Use these only as strategy/playbook guidance. Do not copy old values, do not invent refs, "
+        "and validate all facts in the current VM with runtime tools before finishing. If a card conflicts "
+        "with the task instruction or VM docs, ignore the card.\n"
+        "```json\n"
+        f"{text}\n"
+        "```\n\n"
+    )
+
+
 def _pangolin_instruction(env: str, instruction: str, workspace_root: str) -> str:
     local_rules = harness_seed.render_local_rules_prompt(env=env)
     preflight_context = _load_preflight_context(workspace_root)
@@ -618,6 +723,7 @@ def _pangolin_instruction(env: str, instruction: str, workspace_root: str) -> st
             "```\n"
             "Use it as navigation help only; validate task-specific facts with runtime tools.\n\n"
         )
+    method_cards_block = _ecom_method_cards_block(instruction) if env == "ecom" else ""
     return (
         "You are an autonomous BitGN task agent running the experimental pangolin_loop backbone.\n"
         "You have exactly one model tool: execute_code. Your first response must call execute_code.\n"
@@ -631,6 +737,7 @@ def _pangolin_instruction(env: str, instruction: str, workspace_root: str) -> st
         "Do not ask for confirmation. Stop after successful report_completion/finish.\n"
         f"Environment: {env}. Workspace root: {workspace_root}.\n\n"
         f"{preflight_block}"
+        f"{method_cards_block}"
         "Local rules:\n"
         "```text\n"
         f"{local_rules}\n"
@@ -1837,6 +1944,9 @@ def _run_pangolin_session(
             "syntax_repair": NATIVE_PANGOLIN_SYNTAX_REPAIR,
             "context_compact_tokens": NATIVE_PANGOLIN_CONTEXT_COMPACT_TOKENS,
             "scratchpad_compact_bytes": NATIVE_PANGOLIN_SCRATCHPAD_COMPACT_BYTES,
+            "ecom_method_cards": NATIVE_ECOM_METHOD_CARDS,
+            "ecom_method_card_limit": NATIVE_ECOM_METHOD_CARD_LIMIT,
+            "ecom_method_card_min_score": NATIVE_ECOM_METHOD_CARD_MIN_SCORE,
         }
         workspace.write_json(workspace.codex_session_meta_path, meta)
         workspace.write_json(session_dir / "pangolin_session_meta.json", meta)
