@@ -164,6 +164,35 @@ def _call_bitgn(label: str, func: Any, *, attempts: int = 3) -> Any:
             time.sleep(delay)
 
 
+def _is_ecom_benchmark() -> bool:
+    return "ecom" in BENCHMARK_ID.lower()
+
+
+def _ordered_task_index(task_id: str) -> int:
+    match = re.fullmatch(r"t(\d+)", task_id.strip().lower())
+    if not match:
+        raise RuntimeError(f"ordered ECOM task id expected, got {task_id!r}")
+    return int(match.group(1)) - 1
+
+
+def _prepare_trial_id_only_seeds(
+    *, run_id: str, trial_ids: list[str], task_ids: list[str], source: str
+) -> dict[str, dict[str, str]]:
+    seeds: dict[str, dict[str, str]] = {}
+    for task_id in task_ids:
+        index = _ordered_task_index(task_id)
+        if index < 0 or index >= len(trial_ids):
+            raise RuntimeError(f"run {run_id} returned no trial id for {task_id}")
+        seeds[task_id] = {
+            "trial_id": str(trial_ids[index]),
+            "task_id": task_id,
+            "run_id": run_id,
+            "source": source,
+            "lazy_start_trial": "1",
+        }
+    return seeds
+
+
 def _prepare_leaderboard_trials(
     *, client: HarnessServiceClientSync, task_ids: list[str]
 ) -> tuple[dict[str, dict[str, str]], str | None]:
@@ -190,6 +219,16 @@ def _prepare_leaderboard_trials(
             "[LEADERBOARD] Using Connect JSON fallback for StartRun "
             "(SDK has no api_key field)."
         )
+
+    if _is_ecom_benchmark():
+        seeds = _prepare_trial_id_only_seeds(
+            run_id=run_id,
+            trial_ids=trial_ids,
+            task_ids=ordered_task_ids,
+            source="leaderboard-lazy",
+        )
+        _cli(f"[LEADERBOARD] Prepared lazy run_id={run_id} tasks={len(seeds)}")
+        return seeds, run_id
 
     seeds: dict[str, dict[str, str]] = {}
     for trial_id in trial_ids:
@@ -272,6 +311,17 @@ def _prepare_normal_trials(*, client: HarnessServiceClientSync, task_ids: list[s
         attempts=5,
     )
     run_id = str(run.run_id)
+    if _is_ecom_benchmark():
+        trial_ids = [str(tid) for tid in run.trial_ids]
+        seeds = _prepare_trial_id_only_seeds(
+            run_id=run_id,
+            trial_ids=trial_ids,
+            task_ids=ordered_task_ids,
+            source="normal-run-lazy",
+        )
+        _cli(f"[NORMAL] Prepared lazy run_id={run_id} tasks={len(seeds)}")
+        return seeds
+
     requested = set(ordered_task_ids)
     seeds: dict[str, dict[str, str]] = {}
     for trial_id_raw in run.trial_ids:
@@ -2249,11 +2299,26 @@ def _run_single_task(
         trial_id = str(trial_seed.get("trial_id", ""))
         harness_url = str(trial_seed.get("harness_url", ""))
         instruction = str(trial_seed.get("instruction", ""))
-        if not trial_id or not harness_url:
+        seed_source = str(trial_seed.get("source", "prepared"))
+        if trial_id and (not harness_url or not instruction):
+            _cli(f"[{task_id}] Starting prepared {seed_source} trial {trial_id}")
+            trial = _call_bitgn(
+                "StartTrial",
+                lambda: client.start_trial(StartTrialRequest(trial_id=trial_id)),
+                attempts=5,
+            )
+            actual_task_id = str(trial.task_id)
+            if actual_task_id and actual_task_id != task_id:
+                raise RuntimeError(
+                    f"Prepared trial {trial_id} resolved to {actual_task_id}, expected {task_id}"
+                )
+            trial_id = str(trial.trial_id)
+            harness_url = str(trial.harness_url)
+            instruction = str(trial.instruction)
+        if not trial_id or not harness_url or not instruction:
             raise RuntimeError(
                 f"Prepared trial seed is invalid for task {task_id}: {trial_seed}"
             )
-        seed_source = str(trial_seed.get("source", "prepared"))
         _cli(f"[{task_id}] Using prepared {seed_source} trial {trial_id}")
 
     _cli(f"[{task_id}] Task {task_id}: {instruction}")

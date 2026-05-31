@@ -91,6 +91,12 @@ def _node_kind(raw: Any):
     return EcomNodeKind.NODE_KIND_UNSPECIFIED
 
 
+def _proto_has_field(message_cls: Any, name: str) -> bool:
+    descriptor = getattr(message_cls, "DESCRIPTOR", None)
+    fields = getattr(descriptor, "fields", [])
+    return any(getattr(field, "name", "") == name for field in fields)
+
+
 class ToolGateway:
     def __init__(self, *, env: str, harness_url: str, workspace: TaskWorkspace, task_id: str) -> None:
         self.env = env
@@ -211,7 +217,7 @@ class ToolGateway:
         if tool == "find":
             return self.vm.find(EcomFindRequest(root=self._ecom_path(args.get("root") or args.get("path") or "/"), name=str(args.get("name") or args.get("pattern") or ""), kind=_node_kind(args.get("kind")), limit=int(args.get("limit", 10) or 10)))
         if tool == "search":
-            return self.vm.search(EcomSearchRequest(root=self._ecom_path(args.get("root") or args.get("path") or "/"), pattern=str(args.get("pattern", "")), limit=int(args.get("limit", 10) or 10)))
+            return self.vm.search(EcomSearchRequest(root=self._ecom_path(args.get("root") or args.get("path") or "/"), pattern=str(args.get("pattern") or args.get("query") or ""), limit=int(args.get("limit", 10) or 10)))
         if tool == "list":
             return self.vm.list(EcomListRequest(path=self._ecom_path(args.get("path", "/"))))
         if tool == "read":
@@ -223,7 +229,17 @@ class ToolGateway:
             exec_args = raw if isinstance(raw, list) else []
             return self.vm.exec(EcomExecRequest(path=self._ecom_path(args.get("path", "")), args=[str(x) for x in exec_args], stdin=str(args.get("stdin", ""))))
         if tool == "write":
-            self.vm.write(EcomWriteRequest(path=self._ecom_path(args.get("path", "")), content=str(args.get("content", "")), start_line=int(args.get("start_line", 0) or 0), end_line=int(args.get("end_line", 0) or 0)))
+            request_args: dict[str, Any] = {
+                "path": self._ecom_path(args.get("path", "")),
+                "content": str(args.get("content", "")),
+            }
+            if _proto_has_field(EcomWriteRequest, "start_line"):
+                request_args["start_line"] = int(args.get("start_line", 0) or 0)
+            if _proto_has_field(EcomWriteRequest, "end_line"):
+                request_args["end_line"] = int(args.get("end_line", 0) or 0)
+            if _proto_has_field(EcomWriteRequest, "if_match_sha256") and args.get("if_match_sha256"):
+                request_args["if_match_sha256"] = str(args.get("if_match_sha256"))
+            self.vm.write(EcomWriteRequest(**request_args))
             return {}
         if tool == "delete":
             self.vm.delete(EcomDeleteRequest(path=self._ecom_path(args.get("path", ""))))
