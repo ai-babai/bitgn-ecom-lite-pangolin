@@ -7,7 +7,7 @@ The successful experimental Pangolin-loop preset for local/non-leaderboard model
 ## Location
 
 ```text
-/srv/aika-os/bitgn/code/ecom-small-agent-test
+/srv/aika-os/bitgn/code/bitgn-ecom-lite-pangolin
 ```
 
 ## Run Commands

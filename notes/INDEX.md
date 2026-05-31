@@ -1,4 +1,4 @@
-# Notes - ecom-small-agent-test
+# Notes - bitgn-ecom-lite-pangolin
 
 Local notes for cold native baseline experiments. Keep run summaries short and link to artifacts under `codex-agent-native/runs/`.
 

@@ -1,4 +1,4 @@
-# INDEX - ecom-small-agent-test
+# INDEX - bitgn-ecom-lite-pangolin
 
 Separate BitGN ECOM native-agent testbed for weak/small model experiments.
 

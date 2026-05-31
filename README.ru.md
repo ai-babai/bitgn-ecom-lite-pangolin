@@ -65,7 +65,7 @@ artifacts и backfill score после закрытия run.
 ### ECOM dev, GPT 5.5 High через OmniRoute
 
 ```bash
-cd /srv/aika-os/bitgn/code/ecom-small-agent-test
+cd /srv/aika-os/bitgn/code/bitgn-ecom-lite-pangolin
 
 NATIVE_PANGOLIN_MODEL='codex/gpt-5.5-high' \
 LOCAL_RUN_ID='lite-pangolin-gpt55-ecom-dev-YYYYMMDD' \

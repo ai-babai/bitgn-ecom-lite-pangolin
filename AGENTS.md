@@ -1,4 +1,4 @@
-# AGENTS.md - ecom-small-agent-test
+# AGENTS.md - bitgn-ecom-lite-pangolin
 
 Purpose: BitGN ECOM small-agent native testbed.
 

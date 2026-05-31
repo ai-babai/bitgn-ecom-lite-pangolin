@@ -3,7 +3,7 @@
 ## This Project
 
 ```text
-/srv/aika-os/bitgn/code/ecom-small-agent-test
+/srv/aika-os/bitgn/code/bitgn-ecom-lite-pangolin
 ```
 
 Purpose: separate ECOM small-agent testbed for weak/cheap model gates, helper facades, ref ledgers, and finalization watchdogs.
@@ -17,7 +17,7 @@ Source baseline: `/srv/aika-os/bitgn/code/bitgn-cli-agent-native-test`
   AGENTS.md
   INDEX.md
   code/
-    ecom-small-agent-test/            current small-agent project
+    bitgn-ecom-lite-pangolin/         current Lite Pangolin ECOM project
     bitgn-cli-agent-native-test/      preserved native baseline source
     bitgn-pac1-env/                   mature PAC1/ECOM runner with Codex and Pangolin backbones
     bitgn-ecom1-env/                  ECOM1 workspace adapted from the main runner
